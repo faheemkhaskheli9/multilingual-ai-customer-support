@@ -1,0 +1,5 @@
+[project]
+name = "multilingual-ai-customer-support"
+version = "0.1.0"
+description = "Multilingual Customer Support AI"
+requires-python = ">=3.10"
