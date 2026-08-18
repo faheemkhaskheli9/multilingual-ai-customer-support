@@ -47,6 +47,14 @@ User Message (text/voice, any language) -> Language Detection/Translation -> Int
 3. Phase 3: Multilingual detection and translation layer
 4. Phase 4: Voice message support (STT/TTS)
 
+## Task Tracking
+
+Work is broken into phase-tagged user stories tracked as GitHub Issues, not in this file. To see what's open:
+
+    gh issue list --repo faheemkhaskheli9/multilingual-ai-customer-support --state open --label type:user-story
+
+Implement Phase 1 issues first (later phases depend on it). When you start one, add label `status:in-progress`. When you finish, close it referencing the commit (e.g. `git commit -m "... Closes #4"`) and push.
+
 ## 6. Repository Structure
 
 ```text
