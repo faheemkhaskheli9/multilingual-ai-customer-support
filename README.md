@@ -4,7 +4,7 @@
 > This is an original, from-scratch build. It is not affiliated with, and does not
 > contain any code, prompts, data, or business logic from, any employer or client.
 
-![status](https://img.shields.io/badge/status-planned-lightgrey)
+![status](https://img.shields.io/badge/status-phase%201%20in%20progress-yellow)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -96,11 +96,27 @@ No proprietary, employer-owned, or client-identifiable data is used in this proj
 
 ## 9. Training / Execution
 
-Document the commands used to run training, ingestion, or the main pipeline, e.g.:
+Phase 1 ships a bounded tool-calling chat agent over a mock order backend. It
+runs with no API key (a deterministic rule-based LLM stand-in); a real provider
+drops in behind `mcs.llm.LLMClient` in a later phase.
 
 ```bash
-python -m src.main --config configs/default.yaml
+pip install -r requirements.txt
+
+# One-shot CLI
+PYTHONPATH=src python -m mcs.cli "where is my order #1234?"
+
+# Interactive CLI
+PYTHONPATH=src python -m mcs.cli
+
+# HTTP API
+PYTHONPATH=src uvicorn mcs.api:app --reload
+curl -s localhost:8000/chat -H 'content-type: application/json' \
+  -d '{"message": "where is my order #1234?"}'
 ```
+
+VS Code: use the **MCS: FastAPI (uvicorn)**, **MCS: CLI chat**, or
+**MCS: pytest** run configurations in `.vscode/launch.json`.
 
 ## 10. Evaluation
 
