@@ -1,0 +1,41 @@
+# Runs the mock order/invoice backend (issue #3) alongside a real Postgres
+# instance, for local dev/demo of the "not a live production system" story.
+#
+#   docker compose -f docker/docker-compose.yml up --build
+#   curl localhost:8100/orders/1234
+#
+# The main chat app (mcs.api:app) isn't containerized yet (tracked
+# separately); this compose file is scoped to the mock backend + its DB.
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mcs
+      POSTGRES_PASSWORD: mcs
+      POSTGRES_DB: mock_backend
+    ports:
+      - "5432:5432"
+    volumes:
+      - mock_backend_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcs -d mock_backend"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mock-backend:
+    build:
+      context: ..
+      dockerfile: docker/mock_backend.Dockerfile
+    environment:
+      DATABASE_URL: postgresql://mcs:mcs@postgres:5432/mock_backend
+    ports:
+      - "8100:8100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  mock_backend_pgdata:

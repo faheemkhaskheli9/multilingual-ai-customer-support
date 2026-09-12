@@ -118,6 +118,25 @@ curl -s localhost:8000/chat -H 'content-type: application/json' \
 VS Code: use the **MCS: FastAPI (uvicorn)**, **MCS: CLI chat**, or
 **MCS: pytest** run configurations in `.vscode/launch.json`.
 
+**Mock order/invoice backend** (issue #3): a standalone FastAPI service
+backed by PostgreSQL (SQLite locally/in tests — `mcs.mock_backend.db`),
+seeded with synthetic sample orders/invoices, so the tool-calling flow can
+be built and tested without any live production system:
+
+```bash
+docker compose -f docker/docker-compose.yml up --build
+curl localhost:8100/orders/1234
+curl localhost:8100/invoices/1234
+
+# or locally, no Docker:
+PYTHONPATH=src uvicorn mcs.mock_backend.app:app --port 8100 --reload
+python scripts/seed_mock_backend.py   # re-seed by hand (idempotent) against $DATABASE_URL
+```
+
+Response shapes mirror `mcs.backends.orders`/`mcs.backends.invoices`'s
+in-process mocks, so a later issue can point the agent's tools at this HTTP
+service instead without changing what callers see.
+
 ## 10. Evaluation
 
 Document evaluation metrics and how to reproduce them here (see `docs/evaluation.md`).
