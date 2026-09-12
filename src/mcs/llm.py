@@ -46,10 +46,19 @@ class LLMClient(Protocol):
 _ORDER_INTENT = re.compile(
     r"\b(order|package|parcel|shipment|delivery|tracking)\b", re.IGNORECASE
 )
+# Checked before _ORDER_INTENT: an invoice/billing question mentioning "order"
+# ("invoice for order 1234") must route to the invoice tool, not order status.
+_INVOICE_INTENT = re.compile(r"\b(invoice|billing|bill)\b", re.IGNORECASE)
+# A tax follow-up ("what about the tax on that?") has no id of its own — it
+# must resolve from a prior invoice already in the conversation, not a fresh
+# lookup. See the knowledge-base "working-memory" pattern: the caller
+# (agent.run) threads prior turns in as `messages`, so context lives in that
+# list rather than a server-side session the mock has to reach into.
+_TAX_FOLLOWUP = re.compile(r"\btax\b", re.IGNORECASE)
 # An order id: optional '#', then 3+ digits, or an alphanumeric token that
 # contains at least one digit (e.g. "A1234"). Anchored to a word boundary.
 _ORDER_ID = re.compile(r"#?\b(?=[A-Za-z0-9]*\d)([A-Za-z0-9]{3,})\b")
-_ID_STOPWORDS = {"order", "orders", "status", "where", "number"}
+_ID_STOPWORDS = {"order", "orders", "status", "where", "number", "invoice", "bill", "billing"}
 
 
 def _extract_order_id(text: str) -> str | None:
@@ -86,6 +95,33 @@ class MockLLMClient:
         if user_text is None:
             return LLMResponse(final_text="How can I help you today?")
 
+        if _TAX_FOLLOWUP.search(user_text):
+            prior_invoice = self._latest_tool_payload(messages, "get_invoice")
+            if prior_invoice is not None and prior_invoice.get("found"):
+                # Resolve from the conversation's own history — not a fresh
+                # backend lookup — per the multi-turn follow-up requirement.
+                return LLMResponse(final_text=self._phrase_tax_followup(prior_invoice))
+            return LLMResponse(
+                final_text="I don't have an invoice pulled up yet — what is the order or account number?"
+            )
+
+        if _INVOICE_INTENT.search(user_text):
+            order_id = _extract_order_id(user_text)
+            if order_id is None:
+                return LLMResponse(
+                    final_text="I can pull up that invoice — what is the order or account number?"
+                )
+            self._counter += 1
+            return LLMResponse(
+                tool_calls=(
+                    ToolCall(
+                        id=f"call-{self._counter}",
+                        name="get_invoice",
+                        arguments={"order_id": order_id},
+                    ),
+                )
+            )
+
         if _ORDER_INTENT.search(user_text):
             order_id = _extract_order_id(user_text)
             if order_id is None:
@@ -119,8 +155,36 @@ class MockLLMClient:
         return None
 
     @staticmethod
-    def _phrase_tool_result(tool_msg: dict[str, object]) -> str:
-        payload = tool_msg.get("content")
+    def _latest_tool_payload(
+        messages: list[dict[str, object]], tool_name: str
+    ) -> dict[str, object] | None:
+        """Most recent result of `tool_name` already in this conversation.
+
+        This is what lets a follow-up ("what about the tax on that?") resolve
+        without a fresh backend call — the earlier tool result is still
+        sitting in the thread the caller passed in.
+        """
+
+        for msg in reversed(messages):
+            if msg.get("role") == "tool" and msg.get("name") == tool_name:
+                content = msg.get("content")
+                return content if isinstance(content, dict) else None
+        return None
+
+    @staticmethod
+    def _phrase_tax_followup(invoice: dict[str, object]) -> str:
+        oid = invoice.get("order_id")
+        tax = invoice.get("tax")
+        total = invoice.get("total")
+        return f"The tax on invoice {oid} was ${tax:.2f}, making the total ${total:.2f}."
+
+    def _phrase_tool_result(self, tool_msg: dict[str, object]) -> str:
+        if tool_msg.get("name") == "get_invoice":
+            return self._phrase_invoice_result(tool_msg.get("content"))
+        return self._phrase_order_result(tool_msg.get("content"))
+
+    @staticmethod
+    def _phrase_order_result(payload: object) -> str:
         if not isinstance(payload, dict):
             return "Sorry, I could not read the backend response."
         if not payload.get("found"):
@@ -139,3 +203,23 @@ class MockLLMClient:
         elif carrier:
             parts.append(f"It is with {carrier}.")
         return " ".join(parts)
+
+    @staticmethod
+    def _phrase_invoice_result(payload: object) -> str:
+        if not isinstance(payload, dict):
+            return "Sorry, I could not read the backend response."
+        if not payload.get("found"):
+            oid = payload.get("order_id", "that order")
+            return (
+                f"I couldn't find an invoice for {oid}. "
+                "Please double-check the order or account number."
+            )
+        oid = payload.get("order_id")
+        date = payload.get("date")
+        total = payload.get("total")
+        items = payload.get("line_items") or []
+        item_text = ", ".join(f"{i['description']} (${i['amount']:.2f})" for i in items)
+        return (
+            f"Invoice for order {oid}, dated {date}: {item_text}. "
+            f"Total: ${total:.2f}."
+        )

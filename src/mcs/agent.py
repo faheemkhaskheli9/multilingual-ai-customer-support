@@ -4,8 +4,10 @@ Loop shape follows the knowledge-base pattern "Stateful agentic run lifecycle":
 a bounded request -> tool-call pause -> resume cycle that branches on an
 explicit stop reason instead of only handling the success path.
 
-Phase 1 wires a single tool (``get_order_status``). Issue #4 generalises the
-registry and swaps :class:`~mcs.llm.MockLLMClient` for a real provider.
+Phase 1 wires ``get_order_status`` and ``get_invoice``. Issue #4 generalises
+the registry and swaps :class:`~mcs.llm.MockLLMClient` for a real provider;
+until then, multi-turn context is threaded explicitly via `run(history=...)`
+rather than persisted server-side.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from .backends.invoices import InvoiceNotFoundError, get_invoice
 from .backends.orders import OrderNotFoundError, get_order_status
 from .llm import LLMClient, MockLLMClient, ToolCall
 
@@ -35,7 +38,20 @@ def _tool_get_order_status(arguments: dict[str, object]) -> dict[str, object]:
         return {"found": False, "order_id": order_id}
 
 
-DEFAULT_TOOLS: dict[str, ToolFn] = {"get_order_status": _tool_get_order_status}
+def _tool_get_invoice(arguments: dict[str, object]) -> dict[str, object]:
+    order_id = arguments.get("order_id")
+    if not isinstance(order_id, str) or not order_id.strip():
+        return {"found": False, "order_id": order_id, "error": "missing order_id"}
+    try:
+        return get_invoice(order_id)
+    except InvoiceNotFoundError:
+        return {"found": False, "order_id": order_id}
+
+
+DEFAULT_TOOLS: dict[str, ToolFn] = {
+    "get_order_status": _tool_get_order_status,
+    "get_invoice": _tool_get_invoice,
+}
 
 _TOOL_SPECS = [
     {
@@ -46,7 +62,16 @@ _TOOL_SPECS = [
             "properties": {"order_id": {"type": "string"}},
             "required": ["order_id"],
         },
-    }
+    },
+    {
+        "name": "get_invoice",
+        "description": "Look up invoice amount, date, and line items for an order/account number.",
+        "parameters": {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    },
 ]
 
 
@@ -56,6 +81,12 @@ class AgentResult:
     stop_reason: str  # "completed" | "max_iterations"
     iterations: int
     tool_calls: tuple[str, ...]
+    # Full message thread including this turn, so a caller can pass it back
+    # as `history` on the next `run()` call and get multi-turn follow-ups
+    # ("what about the tax on that?") resolved from context instead of a
+    # fresh lookup. See knowledge-base "working-memory": the application
+    # owns this state explicitly rather than the LLM client accumulating it.
+    history: tuple[dict[str, object], ...]
 
 
 class SupportAgent:
@@ -71,24 +102,29 @@ class SupportAgent:
             raise ValueError("max_iterations must be >= 1")
         self.max_iterations = max_iterations
 
-    def run(self, user_message: str) -> AgentResult:
+    def run(
+        self,
+        user_message: str,
+        history: list[dict[str, object]] | None = None,
+    ) -> AgentResult:
         if not user_message or not user_message.strip():
             raise ValueError("user_message must be non-empty")
 
-        messages: list[dict[str, object]] = [
-            {"role": "user", "content": user_message}
-        ]
+        messages: list[dict[str, object]] = list(history or [])
+        messages.append({"role": "user", "content": user_message})
         invoked: list[str] = []
 
         for iteration in range(1, self.max_iterations + 1):
             response = self.llm.respond(messages, _TOOL_SPECS)
 
             if response.final_text is not None:
+                messages.append({"role": "assistant", "content": response.final_text})
                 return AgentResult(
                     reply=response.final_text,
                     stop_reason="completed",
                     iterations=iteration,
                     tool_calls=tuple(invoked),
+                    history=tuple(messages),
                 )
 
             for call in response.tool_calls:
@@ -107,14 +143,17 @@ class SupportAgent:
                 )
 
         # Deliberate termination: the model never settled on a final answer.
+        reply = (
+            "I'm having trouble completing that request right now. "
+            "Please try rephrasing or contact a human agent."
+        )
+        messages.append({"role": "assistant", "content": reply})
         return AgentResult(
-            reply=(
-                "I'm having trouble completing that request right now. "
-                "Please try rephrasing or contact a human agent."
-            ),
+            reply=reply,
             stop_reason="max_iterations",
             iterations=self.max_iterations,
             tool_calls=tuple(invoked),
+            history=tuple(messages),
         )
 
     def _execute_tool(self, call: ToolCall) -> dict[str, object]:
